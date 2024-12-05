@@ -71,8 +71,6 @@ class MousePosition(BaseModel):
     timestamp: datetime
 
 class MouseData(BaseModel):
-    score: float
-    accuracy: float
     mouse_movements: List[MousePosition]
 
 class MouseAnalysisRequest(BaseModel):
@@ -106,7 +104,7 @@ class MouseMovementClassifier:
     def predict(self, X: np.ndarray) -> List[int]:
         return self.model.predict(X)
 
-
+classifier = MouseMovementClassifier()
 
 # Utility functions
 def create_recaptcha_token(client_id: str) -> str:
@@ -156,13 +154,10 @@ async def assess_token(token: str) -> AssessmentResponse:
 def extract_features(mouse_movements: List[MousePosition]) -> np.ndarray:
     """
     Extract features from mouse movements.
-    Features could include average speed, variance in speed, etc.
     """
     if len(mouse_movements) < 2:
-        # Not enough data to compute features
         return np.array([0, 0, 0, 0])
 
-    # Compute time differences and distances
     times = [movement.timestamp.timestamp() for movement in mouse_movements]
     xs = [movement.x for movement in mouse_movements]
     ys = [movement.y for movement in mouse_movements]
@@ -174,54 +169,19 @@ def extract_features(mouse_movements: List[MousePosition]) -> np.ndarray:
     speeds = distances / time_diffs
 
     # Feature 1: Average speed
-    avg_speed = np.mean(speeds)
+    avg_speed = np.mean(speeds) if len(speeds) > 0 else 0
 
     # Feature 2: Speed variance
-    speed_variance = np.var(speeds)
+    speed_variance = np.var(speeds) if len(speeds) > 0 else 0
 
     # Feature 3: Number of direction changes
     directions = np.arctan2(dy, dx)
-    direction_changes = np.sum(np.abs(np.diff(directions)) > np.pi/4)  # Arbitrary threshold
+    direction_changes = np.sum(np.abs(np.diff(directions)) > (np.pi / 4))  # Arbitrary threshold
 
     # Feature 4: Total distance
     total_distance = np.sum(distances)
 
     return np.array([avg_speed, speed_variance, direction_changes, total_distance])
-
-# Simple Logistic Regression Model (Dummy)
-# In a real-world scenario, you should train this model with actual data
-# Here, we define a simple model with arbitrary coefficients for demonstration
-class MouseMovementClassifier:
-    def __init__(self):
-        self.model = LogisticRegression()
-
-        # Manually set required attributes
-        self.model.classes_ = np.array([0, 1])  # binary classification
-        self.model.coef_ = np.array([[1.5, -1.0, 0.8, 0.5]])  # shape: (n_classes, n_features)
-        self.model.intercept_ = np.array([-0.5])  # shape: (n_classes,)
-        self.model.n_features_in_ = 4  # number of features
-        self.model.n_iter_ = np.array([1])  # at least one iteration
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        # Manually compute the linear scores
-        # scores = X.dot(coef_.T) + intercept_
-        scores = np.dot(X, self.model.coef_.T) + self.model.intercept_
-        
-        sigmoid = 1 / (1 + np.exp(-scores))
-        
-        # Combine probabilities for two classes
-        # If we assume class 0 is negative class and class 1 is positive:
-        proba_class_1 = sigmoid
-        proba_class_0 = 1 - sigmoid
-        return np.hstack([proba_class_0, proba_class_1])
-
-    def predict(self, X: np.ndarray) -> List[int]:
-        probas = self.predict_proba(X)
-        return [int(self.model.classes_[idx]) for idx in np.argmax(probas, axis=1)]
-
-
-# Initialize the classifier
-classifier = MouseMovementClassifier()
 
 async def analyze_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
     features = extract_features(mouse_data.mouse_movements).reshape(1, -1)
@@ -238,8 +198,6 @@ async def analyze_mouse_movements(mouse_data: MouseData) -> MouseAnalysisRespons
         confidence=round(confidence, 2),
         details=details
     )
-
-# Endpoints
 
 @app.on_event("startup")
 async def startup_event():
@@ -294,21 +252,23 @@ async def verify_token(request: VerifyTokenRequest):
 @app.post("/action", response_model=ActionResponse)
 async def perform_action(request: ActionRequest):
     """
-    Step 8: Determine the next action based on the assessment verdict.
+    Step 8: Determine the next action based on mouse movement analysis.
     """
-    assessment_key = f"assessment:{request.recaptcha_token}"
-    assessment_data = await redis_client.hgetall(assessment_key)
+    # Check mouse movement analysis
+    analysis_key = f"analysis:{request.recaptcha_token}"
+    analysis_data = await redis_client.hgetall(analysis_key)
     
-    if not assessment_data:
-        # If assessment not found, perform assessment
-        assessment = await assess_token(request.recaptcha_token)
-    else:
-        # Retrieve existing assessment
-        score = float(assessment_data.get("score", 0.0))
-        reason_codes = assessment_data.get("reason_codes", "").split(",") if assessment_data.get("reason_codes") else []
-        assessment = AssessmentResponse(score=score, reason_codes=reason_codes)
+    if not analysis_data:
+        raise HTTPException(status_code=400, detail="Mouse analysis not found. Please analyze mouse movements first.")
     
-    if assessment.score >= 0.5:
+    try:
+        is_human = analysis_data.get("is_human") == "true"
+        confidence = float(analysis_data.get("confidence", 0.0))
+    except ValueError:
+        raise HTTPException(status_code=500, detail="Corrupted analysis data.")
+    
+    # Decide based solely on mouse movement analysis
+    if is_human and confidence >= 0.5:
         action = "proceed"
         message = "Human verified. Proceeding with the action."
     else:
@@ -330,6 +290,15 @@ async def analyze_mouse(request: MouseAnalysisRequest):
     
     # Analyze mouse movements
     analysis = await analyze_mouse_movements(request.mouse_data)
+    # Bind the token to the analysis in Redis
+    analysis_key = f"analysis:{request.recaptcha_token}"
+    analysis_data = {
+        "is_human": str(analysis.is_human).lower(),
+        "confidence": str(analysis.confidence),
+        "details": analysis.details or ""
+    }
+    await redis_client.hset(analysis_key, mapping=analysis_data)
+    await redis_client.expire(analysis_key, TOKEN_EXPIRATION_MINUTES * 60)
     return analysis
 
 @app.post("/clear")
@@ -338,6 +307,5 @@ async def clear_databases():
     Optional: Endpoint to clear all tokens and assessments from Redis.
     Use with caution. Typically for testing purposes.
     """
-    # WARNING: This will delete all keys in the current Redis DB.
     await redis_client.flushdb()
     return {"message": "Databases cleared."}
