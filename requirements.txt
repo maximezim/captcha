@@ -1,5 +1,7 @@
 fastapi
 uvicorn[standard]
-redis
+PyJWT
+redis>=4.2.0
 pydantic
-pyJWT
+numpy
+scikit-learn
