@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: fastapi-app
+    restart: unless-stopped
+    ports:
+      - "7999:7999"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=20001
+      - REDIS_DB=0
+    depends_on:
+      - redis
+
+  redis:
+    image: "redis:7-alpine"
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "20001:20001" 
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--port", "20001"]
+
+volumes:
+  redis_data:
