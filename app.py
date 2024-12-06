@@ -29,7 +29,7 @@ app.add_middleware(
 
 SECRET_KEY = None
 ALGORITHM = "HS256"
-TOKEN_EXPIRATION_MINUTES = 5
+TOKEN_EXPIRATION_MINUTES = 500000000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -256,23 +256,6 @@ class EnhancedMouseMovementClassifier:
     def predict(self, X: np.ndarray) -> List[int]:
         return self.model.predict(X)
 
-
-# async def analyze_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
-#     features = extract_features(mouse_data.mouse_movements).reshape(1, -1)
-#     probabilities = classifier.predict_proba(features)
-#     human_prob = probabilities[0][1]  
-#     bot_prob = probabilities[0][0]    
-
-#     is_human = human_prob > 0.5
-#     confidence = human_prob if is_human else bot_prob
-#     details = "Human-like mouse movements detected." if is_human else "Bot-like mouse movements detected."
-
-#     return MouseAnalysisResponse(
-#         is_human=is_human,
-#         confidence=round(confidence, 2),
-#         details=details
-#     )
-
 async def analyze_game_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
     enhanced_classifier = EnhancedMouseMovementClassifier()
     features = enhanced_classifier.extract_game_features(mouse_data.mouse_movements).reshape(1, -1)
@@ -365,7 +348,6 @@ async def perform_action(request: ActionRequest):
     except ValueError:
         raise HTTPException(status_code=500, detail="Corrupted analysis data.")
     
-    # Decide based solely on mouse movement analysis
     if is_human and confidence >= 0.5:
         action = "proceed"
         message = "Human verified. Proceeding with the action."
@@ -401,9 +383,5 @@ async def analyze_mouse(request: MouseAnalysisRequest):
 
 @app.post("/clear")
 async def clear_databases():
-    """
-    Optional: Endpoint to clear all tokens and assessments from Redis.
-    Use with caution. Typically for testing purposes.
-    """
     await redis_client.flushdb()
     return {"message": "Databases cleared."}
