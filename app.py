@@ -11,10 +11,21 @@ import asyncio
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
+from fastapi.middleware.cors import CORSMiddleware
 
 import redis.asyncio as redis 
 
+origins = ["*"] 
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SECRET_KEY = None
 ALGORITHM = "HS256"
@@ -183,15 +194,102 @@ def extract_features(mouse_movements: List[MousePosition]) -> np.ndarray:
 
     return np.array([avg_speed, speed_variance, direction_changes, total_distance])
 
-async def analyze_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
-    features = extract_features(mouse_data.mouse_movements).reshape(1, -1)
-    probabilities = classifier.predict_proba(features)
+class EnhancedMouseMovementClassifier:
+    def __init__(self):
+        self.model = LogisticRegression(max_iter=1000)
+
+        # More representative dummy data for game-like movements
+        dummy_X = np.array([
+            # Bot-like characteristics
+            [0.1, 0.05, 1, 10],    # Low speed, low variance, few direction changes, short distance
+            [0.05, 0.01, 0, 5],    # Very mechanical movement
+            
+            # Human-like game movement characteristics
+            [2.5, 1.5, 3, 200],    # Higher speed, more variance, multiple direction changes, longer distance
+            [3.0, 2.0, 4, 250]     # Quick, varied movements typical in game interactions
+        ])
+        dummy_y = np.array([0, 0, 1, 1])  # 0 for bot, 1 for human
+        self.model.fit(dummy_X, dummy_y)
+
+    def extract_game_features(self, mouse_movements: List[MousePosition]) -> np.ndarray:
+        """
+        Enhanced feature extraction for game-specific mouse movements
+        """
+        if len(mouse_movements) < 2:
+            return np.array([0, 0, 0, 0])
+
+        times = [movement.timestamp.timestamp() for movement in mouse_movements]
+        xs = [movement.x for movement in mouse_movements]
+        ys = [movement.y for movement in mouse_movements]
+
+        time_diffs = np.diff(times)
+        dx = np.diff(xs)
+        dy = np.diff(ys)
+        distances = np.sqrt(dx**2 + dy**2)
+        
+        # Game-specific speed calculation (focusing on horizontal speed)
+        horizontal_speeds = np.abs(dx) / time_diffs
+
+        # Feature 1: Maximum horizontal speed
+        max_horizontal_speed = np.max(horizontal_speeds) if len(horizontal_speeds) > 0 else 0
+
+        # Feature 2: Horizontal speed variance
+        horizontal_speed_variance = np.var(horizontal_speeds) if len(horizontal_speeds) > 0 else 0
+
+        # Feature 3: Horizontal direction changes
+        horizontal_directions = np.sign(dx)
+        direction_changes = np.sum(np.abs(np.diff(horizontal_directions)) > 0)
+
+        # Feature 4: Total horizontal distance
+        total_horizontal_distance = np.sum(np.abs(dx))
+
+        return np.array([
+            max_horizontal_speed, 
+            horizontal_speed_variance, 
+            direction_changes, 
+            total_horizontal_distance
+        ])
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self.model.predict_proba(X)
+
+    def predict(self, X: np.ndarray) -> List[int]:
+        return self.model.predict(X)
+
+
+# async def analyze_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
+#     features = extract_features(mouse_data.mouse_movements).reshape(1, -1)
+#     probabilities = classifier.predict_proba(features)
+#     human_prob = probabilities[0][1]  
+#     bot_prob = probabilities[0][0]    
+
+#     is_human = human_prob > 0.5
+#     confidence = human_prob if is_human else bot_prob
+#     details = "Human-like mouse movements detected." if is_human else "Bot-like mouse movements detected."
+
+#     return MouseAnalysisResponse(
+#         is_human=is_human,
+#         confidence=round(confidence, 2),
+#         details=details
+#     )
+
+async def analyze_game_mouse_movements(mouse_data: MouseData) -> MouseAnalysisResponse:
+    enhanced_classifier = EnhancedMouseMovementClassifier()
+    features = enhanced_classifier.extract_game_features(mouse_data.mouse_movements).reshape(1, -1)
+    
+    probabilities = enhanced_classifier.predict_proba(features)
     human_prob = probabilities[0][1]  
     bot_prob = probabilities[0][0]    
 
     is_human = human_prob > 0.5
     confidence = human_prob if is_human else bot_prob
-    details = "Human-like mouse movements detected." if is_human else "Bot-like mouse movements detected."
+    
+    # More game-specific details
+    details = (
+        "Quick, varied horizontal movements detected. Typical of human game interactions." 
+        if is_human else 
+        "Mechanically uniform mouse movements detected. Potentially bot-like."
+    )
 
     return MouseAnalysisResponse(
         is_human=is_human,
@@ -289,7 +387,7 @@ async def analyze_mouse(request: MouseAnalysisRequest):
         raise HTTPException(status_code=400, detail="Invalid or expired reCAPTCHA token.")
     
     # Analyze mouse movements
-    analysis = await analyze_mouse_movements(request.mouse_data)
+    analysis = await analyze_game_mouse_movements(request.mouse_data)
     # Bind the token to the analysis in Redis
     analysis_key = f"analysis:{request.recaptcha_token}"
     analysis_data = {
